@@ -24,73 +24,136 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Configurar Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Configurar Node 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
 
-      - name: Instalar Android SDK 35
-        run: |
-          sdkmanager "platforms;android-35" "build-tools;35.0.0"
-
-      - name: Localizar ZIP do EIXO
+      - name: Preparar Android SDK
         shell: bash
         run: |
-          echo "Arquivos do repositório:"
-          find . -maxdepth 3 -type f
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
 
-          ZIP_FILE="$(find . -type f -iname '*EIXO*Android*Source*.zip' | head -n 1)"
+          command -v sdkmanager
+
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+
+          sdkmanager \
+            "platform-tools" \
+            "platforms;android-35" \
+            "build-tools;35.0.0"
+
+      - name: Extrair PWA do EIXO
+        shell: bash
+        run: |
+          set -e
+
+          ZIP_FILE="$(find . -maxdepth 2 -type f -iname 'EIXO*v0.3*PWA*.zip' | head -n 1)"
 
           if [ -z "$ZIP_FILE" ]; then
-            echo "ERRO: ZIP do projeto EIXO não encontrado."
+            ZIP_FILE="$(find . -maxdepth 2 -type f -iname '*EIXO*.zip' | head -n 1)"
+          fi
+
+          if [ -z "$ZIP_FILE" ]; then
+            echo "ERRO: nenhum ZIP do EIXO foi encontrado."
+            find . -maxdepth 3 -type f
             exit 1
           fi
 
-          echo "ZIP encontrado: $ZIP_FILE"
+          echo "ZIP encontrado:"
+          echo "$ZIP_FILE"
 
-          mkdir -p /tmp/eixo
-          unzip -q "$ZIP_FILE" -d /tmp/eixo
+          rm -rf extracted web
 
-          echo "Conteúdo extraído:"
-          find /tmp/eixo -maxdepth 4 -type f | head -100
+          mkdir -p extracted
+          mkdir -p web
 
-          SETTINGS="$(find /tmp/eixo -type f \( -name 'settings.gradle' -o -name 'settings.gradle.kts' \) | head -n 1)"
+          unzip -q "$ZIP_FILE" -d extracted
 
-          if [ -z "$SETTINGS" ]; then
-            echo "ERRO: settings.gradle não encontrado."
+          INDEX_FILE="$(find extracted -type f -name 'index.html' | head -n 1)"
+
+          if [ -z "$INDEX_FILE" ]; then
+            echo "ERRO: index.html não encontrado."
+            find extracted -maxdepth 5 -type f
             exit 1
           fi
 
-          PROJECT_ROOT="$(dirname "$SETTINGS")"
+          WEB_ROOT="$(dirname "$INDEX_FILE")"
 
-          echo "Projeto Android encontrado em:"
-          echo "$PROJECT_ROOT"
+          echo "PWA encontrada em:"
+          echo "$WEB_ROOT"
 
-          echo "PROJECT_ROOT=$PROJECT_ROOT" >> "$GITHUB_ENV"
+          cp -a "$WEB_ROOT"/. web/
 
-      - name: Configurar Gradle
-        uses: gradle/actions/setup-gradle@v4
-        with:
-          gradle-version: "8.9"
+          if [ ! -f web/index.html ]; then
+            echo "ERRO: index.html não foi copiado."
+            exit 1
+          fi
+
+          echo "Conteúdo preparado:"
+          find web -maxdepth 3 -type f | head -100
+
+      - name: Criar projeto Android
+        shell: bash
+        run: |
+          cat > package.json <<'EOF'
+          {
+            "name": "eixo-life",
+            "version": "0.3.0",
+            "private": true,
+            "dependencies": {
+              "@capacitor/core": "^7.0.0",
+              "@capacitor/android": "^7.0.0"
+            },
+            "devDependencies": {
+              "@capacitor/cli": "^7.0.0"
+            }
+          }
+          EOF
+
+          cat > capacitor.config.json <<'EOF'
+          {
+            "appId": "com.eixo.life",
+            "appName": "EIXO",
+            "webDir": "web",
+            "server": {
+              "androidScheme": "https"
+            }
+          }
+          EOF
+
+          npm install --no-audit --no-fund
+
+          npx cap add android
+
+          npx cap sync android
 
       - name: Compilar APK
         shell: bash
         run: |
-          cd "$PROJECT_ROOT"
+          set -e
 
-          if [ -f "./gradlew" ]; then
-            chmod +x ./gradlew
-            ./gradlew --no-daemon :app:assembleDebug
-          else
-            gradle --no-daemon :app:assembleDebug
-          fi
+          cd android
 
-      - name: Preparar APK
+          chmod +x ./gradlew
+
+          ./gradlew \
+            --no-daemon \
+            assembleDebug
+
+      - name: Encontrar APK
         shell: bash
         run: |
-          APK="$(find "$PROJECT_ROOT/app/build/outputs/apk" -type f -name '*.apk' | head -n 1)"
+          set -e
+
+          APK="$(find android/app/build/outputs/apk/debug -type f -name '*.apk' | head -n 1)"
 
           if [ -z "$APK" ]; then
-            echo "ERRO: APK não foi encontrado."
-            find "$PROJECT_ROOT" -type f -name "*.apk"
+            echo "ERRO: APK não encontrado."
+
+            find android -type f -name "*.apk"
+
             exit 1
           fi
 
@@ -98,9 +161,10 @@ jobs:
           echo "$APK"
 
           mkdir -p release
+
           cp "$APK" release/EIXO-v0.3.apk
 
-          ls -lh release/
+          ls -lh release/EIXO-v0.3.apk
 
       - name: Publicar APK
         uses: actions/upload-artifact@v4
