@@ -12,14 +12,14 @@ permissions:
 jobs:
   build:
     name: Compilar EIXO
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Baixar repositório
         uses: actions/checkout@v4
 
       - name: Configurar Java 17
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -29,25 +29,24 @@ jobs:
         with:
           node-version: "22"
 
-      - name: Preparar Android SDK
+      - name: Verificar ambiente Android
         shell: bash
         run: |
           echo "ANDROID_HOME=$ANDROID_HOME"
           echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
 
-          command -v sdkmanager
+          test -d "$ANDROID_HOME"
+          test -d "$ANDROID_HOME/platforms/android-35"
 
-          yes | sdkmanager --licenses >/dev/null 2>&1 || true
-
-          sdkmanager \
-            "platform-tools" \
-            "platforms;android-35" \
-            "build-tools;35.0.0"
+          echo "Android SDK encontrado com sucesso."
 
       - name: Extrair PWA do EIXO
         shell: bash
         run: |
           set -e
+
+          echo "Arquivos no repositório:"
+          find . -maxdepth 2 -type f
 
           ZIP_FILE="$(find . -maxdepth 2 -type f -iname 'EIXO*v0.3*PWA*.zip' | head -n 1)"
 
@@ -56,8 +55,7 @@ jobs:
           fi
 
           if [ -z "$ZIP_FILE" ]; then
-            echo "ERRO: nenhum ZIP do EIXO foi encontrado."
-            find . -maxdepth 3 -type f
+            echo "ERRO: ZIP do EIXO não encontrado."
             exit 1
           fi
 
@@ -65,36 +63,35 @@ jobs:
           echo "$ZIP_FILE"
 
           rm -rf extracted web
-
-          mkdir -p extracted
-          mkdir -p web
+          mkdir -p extracted web
 
           unzip -q "$ZIP_FILE" -d extracted
 
-          INDEX_FILE="$(find extracted -type f -name 'index.html' | head -n 1)"
+          echo "Conteúdo extraído:"
+          find extracted -maxdepth 4 -type f
+
+          INDEX_FILE="$(find extracted -type f -iname 'index.html' | head -n 1)"
 
           if [ -z "$INDEX_FILE" ]; then
-            echo "ERRO: index.html não encontrado."
-            find extracted -maxdepth 5 -type f
+            echo "ERRO: index.html não encontrado dentro do ZIP."
             exit 1
           fi
 
           WEB_ROOT="$(dirname "$INDEX_FILE")"
 
-          echo "PWA encontrada em:"
+          echo "Raiz da aplicação:"
           echo "$WEB_ROOT"
 
           cp -a "$WEB_ROOT"/. web/
 
           if [ ! -f web/index.html ]; then
-            echo "ERRO: index.html não foi copiado."
+            echo "ERRO: index.html não foi preparado."
             exit 1
           fi
 
-          echo "Conteúdo preparado:"
-          find web -maxdepth 3 -type f | head -100
+          echo "PWA preparada com sucesso."
 
-      - name: Criar projeto Android
+      - name: Criar configuração do Capacitor
         shell: bash
         run: |
           cat > package.json <<'EOF'
@@ -103,11 +100,11 @@ jobs:
             "version": "0.3.0",
             "private": true,
             "dependencies": {
-              "@capacitor/core": "^7.0.0",
-              "@capacitor/android": "^7.0.0"
+              "@capacitor/core": "7.4.3",
+              "@capacitor/android": "7.4.3"
             },
             "devDependencies": {
-              "@capacitor/cli": "^7.0.0"
+              "@capacitor/cli": "7.4.3"
             }
           }
           EOF
@@ -123,11 +120,27 @@ jobs:
           }
           EOF
 
+      - name: Instalar Capacitor
+        shell: bash
+        run: |
           npm install --no-audit --no-fund
 
           npx cap add android
-
           npx cap sync android
+
+          echo "Projeto Android criado."
+
+      - name: Mostrar configuração Android
+        shell: bash
+        run: |
+          find android -maxdepth 3 -type f | head -100
+
+          echo "Java:"
+          java -version
+
+          echo "Gradle:"
+          cd android
+          ./gradlew --version
 
       - name: Compilar APK
         shell: bash
@@ -140,30 +153,30 @@ jobs:
 
           ./gradlew \
             --no-daemon \
+            --stacktrace \
             assembleDebug
 
-      - name: Encontrar APK
+      - name: Preparar APK final
         shell: bash
         run: |
           set -e
 
-          APK="$(find android/app/build/outputs/apk/debug -type f -name '*.apk' | head -n 1)"
+          echo "Procurando APK..."
+
+          find android -type f -name "*.apk"
+
+          APK="$(find android/app/build/outputs/apk -type f -name '*.apk' | head -n 1)"
 
           if [ -z "$APK" ]; then
-            echo "ERRO: APK não encontrado."
-
-            find android -type f -name "*.apk"
-
+            echo "ERRO: compilação terminou sem APK."
             exit 1
           fi
-
-          echo "APK encontrado:"
-          echo "$APK"
 
           mkdir -p release
 
           cp "$APK" release/EIXO-v0.3.apk
 
+          echo "APK FINAL:"
           ls -lh release/EIXO-v0.3.apk
 
       - name: Publicar APK
