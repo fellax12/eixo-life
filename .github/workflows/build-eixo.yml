@@ -1,103 +1,76 @@
-name: Build EIXO APK
+name: Build EIXO Android v0.13
 
 on:
   workflow_dispatch:
   push:
     branches:
       - main
+    paths:
+      - .github/workflows/build-eixo.yml
 
 permissions:
   contents: read
 
 jobs:
   build:
-    name: Compilar EIXO
+    name: EIXO Android Test APK
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    env:
+      EIXO_URL: https://eixo-life.floot.app/
+      APP_ID: com.eixo.life
+      APP_VERSION: 0.13.0
 
     steps:
-      - name: Baixar repositório
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Configurar Java 17
-        uses: actions/setup-java@v5
+      - name: Java 21 required by Capacitor 7
+        uses: actions/setup-java@v4
         with:
           distribution: temurin
-          java-version: "17"
+          java-version: '21'
 
-      - name: Configurar Node 22
+      - name: Node.js 22
         uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: '22'
 
-      - name: Verificar ambiente Android
+      - name: Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Verify published EIXO before packaging
         shell: bash
         run: |
-          echo "ANDROID_HOME=$ANDROID_HOME"
-          echo "ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+          set -euo pipefail
+          curl --fail --location --silent --show-error --retry 3 "$EIXO_URL" -o /tmp/eixo-live.html
+          test -s /tmp/eixo-live.html
+          curl --fail --location --silent --show-error --retry 3 \
+            'https://eixo-life.floot.app/_cdn/static/3b1ec52f-a236-43a2-8bb2-150444a4f69f-eixo-v0.13-ui-polish.txt' \
+            -o /tmp/eixo-source.html
+          grep -qi '<!doctype html>' /tmp/eixo-source.html
+          grep -q 'initSupabaseAuth' /tmp/eixo-source.html
+          echo 'EIXO published site and v0.13 source verified.'
 
-          test -d "$ANDROID_HOME"
-          test -d "$ANDROID_HOME/platforms/android-35"
-
-          echo "Android SDK encontrado com sucesso."
-
-      - name: Extrair PWA do EIXO
+      - name: Prepare Capacitor project
         shell: bash
         run: |
-          set -e
-
-          echo "Arquivos no repositório:"
-          find . -maxdepth 2 -type f
-
-          ZIP_FILE="$(find . -maxdepth 2 -type f -iname 'EIXO*v0.3*PWA*.zip' | head -n 1)"
-
-          if [ -z "$ZIP_FILE" ]; then
-            ZIP_FILE="$(find . -maxdepth 2 -type f -iname '*EIXO*.zip' | head -n 1)"
-          fi
-
-          if [ -z "$ZIP_FILE" ]; then
-            echo "ERRO: ZIP do EIXO não encontrado."
-            exit 1
-          fi
-
-          echo "ZIP encontrado:"
-          echo "$ZIP_FILE"
-
-          rm -rf extracted web
-          mkdir -p extracted web
-
-          unzip -q "$ZIP_FILE" -d extracted
-
-          echo "Conteúdo extraído:"
-          find extracted -maxdepth 4 -type f
-
-          INDEX_FILE="$(find extracted -type f -iname 'index.html' | head -n 1)"
-
-          if [ -z "$INDEX_FILE" ]; then
-            echo "ERRO: index.html não encontrado dentro do ZIP."
-            exit 1
-          fi
-
-          WEB_ROOT="$(dirname "$INDEX_FILE")"
-
-          echo "Raiz da aplicação:"
-          echo "$WEB_ROOT"
-
-          cp -a "$WEB_ROOT"/. web/
-
-          if [ ! -f web/index.html ]; then
-            echo "ERRO: index.html não foi preparado."
-            exit 1
-          fi
-
-          echo "PWA preparada com sucesso."
-
-      - name: Criar configuração do Capacitor
-        shell: bash
-        run: |
-          cat > package.json <<'EOF'
+          set -euo pipefail
+          mkdir -p web
+          cat > web/index.html <<'HTML'
+          <!doctype html>
+          <html lang="pt-BR">
+          <head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>EIXO</title></head>
+          <body style="margin:0;background:#0b0d10;color:#f5f7f9;font:16px system-ui;padding:28px">
+          <h1>EIXO</h1><p>Para abrir o EIXO, conecte-se à internet e reinicie o aplicativo.</p>
+          </body>
+          </html>
+          HTML
+          cat > package.json <<'JSON'
           {
-            "name": "eixo-life",
-            "version": "0.3.0",
+            "name": "eixo-android",
+            "version": "0.13.0",
             "private": true,
             "dependencies": {
               "@capacitor/core": "7.4.3",
@@ -107,82 +80,66 @@ jobs:
               "@capacitor/cli": "7.4.3"
             }
           }
-          EOF
-
-          cat > capacitor.config.json <<'EOF'
+          JSON
+          cat > capacitor.config.json <<'JSON'
           {
             "appId": "com.eixo.life",
             "appName": "EIXO",
             "webDir": "web",
             "server": {
-              "androidScheme": "https"
+              "url": "https://eixo-life.floot.app/",
+              "androidScheme": "https",
+              "cleartext": false,
+              "allowNavigation": ["eixo-life.floot.app"]
             }
           }
-          EOF
+          JSON
+          # The published site, not the old EIXO-v0.3-PWA.zip, is loaded in
+          # the native WebView. This preserves the origin for current auth/data.
 
-      - name: Instalar Capacitor
+      - name: Install Capacitor and generate native Android project
         shell: bash
         run: |
+          set -euo pipefail
           npm install --no-audit --no-fund
-
           npx cap add android
           npx cap sync android
+          test -f android/gradlew
+          test -f android/app/src/main/AndroidManifest.xml
+          grep -q 'com.eixo.life' android/app/build.gradle
+          echo 'Native Android project created.'
 
-          echo "Projeto Android criado."
-
-      - name: Mostrar configuração Android
+      - name: Compile installable APK
         shell: bash
+        env:
+          GRADLE_OPTS: -Dorg.gradle.jvmargs=-Xmx4g
         run: |
-          find android -maxdepth 3 -type f | head -100
-
-          echo "Java:"
+          set -euo pipefail
           java -version
-
-          echo "Gradle:"
+          chmod +x android/gradlew
           cd android
-          ./gradlew --version
+          ./gradlew :app:assembleDebug --no-daemon --stacktrace
 
-      - name: Compilar APK
+      - name: Validate and package APK
         shell: bash
         run: |
-          set -e
+          set -euo pipefail
+          APK='android/app/build/outputs/apk/debug/app-debug.apk'
+          test -s "$APK"
+          AAPT="$(find "$ANDROID_HOME/build-tools" -type f -name aapt | sort -V | tail -n 1)"
+          test -n "$AAPT"
+          "$AAPT" dump badging "$APK" > /tmp/eixo-badging.txt
+          grep -q "package: name='com.eixo.life'" /tmp/eixo-badging.txt
+          mkdir -p dist
+          cp "$APK" dist/EIXO-v0.13-Android-Test.apk
+          sha256sum dist/EIXO-v0.13-Android-Test.apk > dist/EIXO-v0.13-Android-Test.apk.sha256
+          ls -lh dist/*
 
-          cd android
-
-          chmod +x ./gradlew
-
-          ./gradlew \
-            --no-daemon \
-            --stacktrace \
-            assembleDebug
-
-      - name: Preparar APK final
-        shell: bash
-        run: |
-          set -e
-
-          echo "Procurando APK..."
-
-          find android -type f -name "*.apk"
-
-          APK="$(find android/app/build/outputs/apk -type f -name '*.apk' | head -n 1)"
-
-          if [ -z "$APK" ]; then
-            echo "ERRO: compilação terminou sem APK."
-            exit 1
-          fi
-
-          mkdir -p release
-
-          cp "$APK" release/EIXO-v0.3.apk
-
-          echo "APK FINAL:"
-          ls -lh release/EIXO-v0.3.apk
-
-      - name: Publicar APK
+      - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: EIXO-APK
-          path: release/EIXO-v0.3.apk
+          name: EIXO-v0.13-Android-Test
+          path: dist/
           if-no-files-found: error
           retention-days: 30
+          
