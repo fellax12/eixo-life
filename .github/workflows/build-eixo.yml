@@ -81,7 +81,22 @@ jobs:
             -storepass android \
             -alias androiddebugkey >/dev/null
 
-          echo 'Assinatura fixa EIXO carregada do GitHub Secrets.'
+          PIN='1eaf62a2d7504055022c6303dd18fbfb6458a11aae6eb544de000c65497e2926'
+
+          KEY_SHA="$(keytool -exportcert \
+            -keystore "$HOME/.android/debug.keystore" \
+            -storepass android \
+            -alias androiddebugkey 2>/dev/null \
+            | sha256sum | awk '{print $1}')"
+
+          echo "Certificado configurado: $KEY_SHA"
+
+          if [ "$KEY_SHA" != "$PIN" ]; then
+            echo 'ERRO: o Secret contem uma chave diferente da assinatura fixa EIXO.'
+            exit 1
+          fi
+
+          echo 'Assinatura fixa EIXO validada e carregada do GitHub Secrets.'
 
       - name: Download EIXO interface
         shell: bash
@@ -109,17 +124,24 @@ jobs:
           def exactly(text, old, new, name):
               n = text.count(old)
               if n != 1:
-                  raise RuntimeError(f'{name}: expected one location, got {n}')
+                  raise RuntimeError(
+                      f'{name}: expected one location, got {n}'
+                  )
               return text.replace(old, new, 1)
 
           src = Path(sys.argv[1]).read_text('utf-8')
 
-          selectors = re.compile(r'(?m)^([ \t]*)\$\(([^()\n]+)\)\.forEach')
+          selectors = re.compile(
+              r'(?m)^([ \t]*)\$\(([^()\n]+)\)\.forEach'
+          )
 
           if len(selectors.findall(src)):
               repairs = len(selectors.findall(src))
+
               if repairs != 6:
-                  raise RuntimeError(f'Unexpected selector repairs: {repairs}')
+                  raise RuntimeError(
+                      f'Unexpected selector repairs: {repairs}'
+                  )
 
               src = selectors.sub(
                   lambda m: m.group(1) + '$$(' + m.group(2) + ').forEach',
@@ -143,7 +165,9 @@ jobs:
               }finally{clearTimeout(timer)}
             }'''
 
-          src = exactly(src, marker, helper, 'fetch timeout helper')
+          src = exactly(
+              src, marker, helper, 'fetch timeout helper'
+          )
 
           src, n = re.subn(
               r'\bawait fetch\(',
@@ -152,7 +176,9 @@ jobs:
           )
 
           if n < 8:
-              raise RuntimeError(f'Expected several API calls; replaced {n}')
+              raise RuntimeError(
+                  f'Expected several API calls; replaced {n}'
+              )
 
           old = """    }catch{return null}
             }
@@ -162,7 +188,9 @@ jobs:
             }
             function normalizeCloudState(raw){"""
 
-          src = exactly(src, old, new, 'cloud read failure guard')
+          src = exactly(
+              src, old, new, 'cloud read failure guard'
+          )
 
           old = """  async function initSupabaseAuth(){
               googleEnabled=await detectGoogleProvider();
@@ -195,7 +223,9 @@ jobs:
               }finally{authReady=true;render()}
             }"""
 
-          src = exactly(src, old, new, 'auth startup catch/finally')
+          src = exactly(
+              src, old, new, 'auth startup catch/finally'
+          )
 
           old = """const session={...data,expires_at:Math.floor(Date.now()/1000)+(data.expires_in||3600)};storeSession(session);authSession=await fetchAuthUser(session);storeSession(authSession);await syncAfterLogin();authMessage='';render();"""
 
@@ -206,13 +236,17 @@ jobs:
               authSession=checked;storeSession(checked);
               await syncAfterLogin();authMessage='';render();"""
 
-          src = exactly(src, old, new, 'sign-in validation')
+          src = exactly(
+              src, old, new, 'sign-in validation'
+          )
 
           old = """authSession=await fetchAuthUser(session);storeSession(authSession);state.profile.name=state.profile.name||name;"""
 
           new = """authSession=await fetchAuthUser(session);if(!authSession)throw new Error('Não foi possível confirmar a nova conta. Tente novamente.');storeSession(authSession);state.profile.name=state.profile.name||name;"""
 
-          src = exactly(src, old, new, 'signup validation')
+          src = exactly(
+              src, old, new, 'signup validation'
+          )
 
           src = exactly(
               src,
@@ -221,18 +255,23 @@ jobs:
               'title'
           )
 
-          for term in [
+          required = [
               'function eixoHandleBack',
               'function applyEixoReset',
               'data-bulk-delete',
               'data-reset-kind',
               'async function eixoFetch',
               'bootstrapped:true'
-          ]:
+          ]
+
+          for term in required:
               if term not in src:
                   raise RuntimeError('Missing feature: ' + term)
 
-          Path(sys.argv[2]).write_text(src, encoding='utf-8')
+          Path(sys.argv[2]).write_text(
+              src,
+              encoding='utf-8'
+          )
 
           print(
               'EIXO source prepared. Bytes:',
@@ -245,7 +284,11 @@ jobs:
 
           node <<'JS'
           const fs = require('fs');
-          const text = fs.readFileSync('web/index.html','utf8');
+
+          const text = fs.readFileSync(
+            'web/index.html',
+            'utf8'
+          );
 
           const scripts = [
             ...text.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)
@@ -339,11 +382,15 @@ jobs:
           )
 
           if a != 1 or b != 1:
-              raise RuntimeError('Não foi possível atualizar versionCode/versionName')
+              raise RuntimeError(
+                  'Não foi possível atualizar versionCode/versionName'
+              )
 
           f.write_text(s)
 
-          print('Android versionCode=141, versionName=0.14.1')
+          print(
+              'Android versionCode=141, versionName=0.14.1'
+          )
           PY
 
       - name: Install direct HTML loader and Android Back handler
@@ -357,7 +404,9 @@ jobs:
           grep -q '^package com\.eixo\.life;' "$MAIN"
 
           mkdir -p android/app/src/main/assets
-          cp web/index.html android/app/src/main/assets/eixo-v0141.html
+
+          cp web/index.html \
+            android/app/src/main/assets/eixo-v0141.html
 
           cat > "$MAIN" <<'JAVA'
           package com.eixo.life;
@@ -395,7 +444,6 @@ jobs:
                   super.onCreate(state);
 
                   if (getBridge() != null) {
-
                       getBridge().setWebViewClient(
                           new BridgeWebViewClient(getBridge()) {
 
@@ -419,14 +467,19 @@ jobs:
                                   ) {
                                       try {
                                           InputStream html =
-                                              MainActivity.this.getAssets().open("eixo-v0141.html");
+                                              MainActivity.this.getAssets().open(
+                                                  "eixo-v0141.html"
+                                              );
 
                                           return new WebResourceResponse(
                                               "text/html",
                                               "UTF-8",
                                               200,
                                               "OK",
-                                              Collections.singletonMap("Cache-Control", "no-store"),
+                                              Collections.singletonMap(
+                                                  "Cache-Control",
+                                                  "no-store"
+                                              ),
                                               html
                                           );
 
@@ -439,7 +492,10 @@ jobs:
                                       }
                                   }
 
-                                  return super.shouldInterceptRequest(view, request);
+                                  return super.shouldInterceptRequest(
+                                      view,
+                                      request
+                                  );
                               }
                           }
                       );
@@ -450,7 +506,9 @@ jobs:
 
                       webView.post(() -> {
                           webView.stopLoading();
-                          webView.loadUrl(SITE_URL + "?eixo-native=141");
+                          webView.loadUrl(
+                              SITE_URL + "?eixo-native=141"
+                          );
                       });
                   }
 
@@ -495,56 +553,4 @@ jobs:
           grep -q 'text/html' "$MAIN"
           grep -q 'eixoHandleBack' "$MAIN"
 
-      - name: Compile APK using fixed signing key
-        shell: bash
-        env:
-          GRADLE_OPTS: -Dorg.gradle.jvmargs=-Xmx4g
-        run: |
-          set -euo pipefail
-
-          chmod +x android/gradlew
-
-          cd android
-
-          ./gradlew :app:assembleDebug --no-daemon --stacktrace
-
-      - name: Verify signature and APK
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          APK='android/app/build/outputs/apk/debug/app-debug.apk'
-
-          test -s "$APK"
-
-          TOOLS="$ANDROID_SDK_ROOT/build-tools/35.0.0"
-
-          "$TOOLS/aapt" dump badging "$APK" > /tmp/eixo-badging.txt
-
-          grep -q "package: name='com.eixo.life' versionCode='141'" \
-            /tmp/eixo-badging.txt
-
-          "$TOOLS/apksigner" verify --print-certs "$APK" > /tmp/eixo-signing.txt
-
-          grep -qi '1eaf62a2d7504055022c6303dd18fbfb6458a11aae6eb544de000c65497e2926' \
-            /tmp/eixo-signing.txt
-
-          mkdir -p dist
-
-          cp "$APK" dist/EIXO-v0.14.1-Login-Fix.apk
-
-          sha256sum dist/EIXO-v0.14.1-Login-Fix.apk \
-            > dist/EIXO-v0.14.1-Login-Fix.apk.sha256
-
-          echo 'APK, versionCode e assinatura fixa EIXO verificados.'
-
-          ls -lh dist/*
-
-      - name: Upload APK
-        uses: actions/upload-artifact@v4
-        with:
-          name: EIXO-v0.14.1-Login-Fix
-          path: dist/
-          if-no-files-found: error
-          retention-days: 30
-          
+      - name: Compile APK using fixed s
