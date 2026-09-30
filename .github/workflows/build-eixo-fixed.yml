@@ -1,0 +1,383 @@
+name: Build EIXO Android v0.14.1 Login Fix
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/build-eixo.yml
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: EIXO v0.14.1 Fixed Signature APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      ANDROID_HOME: /usr/local/lib/android/sdk
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Android SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDKMANAGER="$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -f "$SDKMANAGER" ]; then
+            SDKMANAGER="$(find "$ANDROID_SDK_ROOT/cmdline-tools" -type f -name sdkmanager | sort -V | tail -n 1)"
+          fi
+          test -n "$SDKMANAGER"
+          test -f "$SDKMANAGER"
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" 'platform-tools' 'platforms;android-35' 'build-tools;35.0.0'
+          test -f "$ANDROID_SDK_ROOT/build-tools/35.0.0/aapt"
+
+      - name: Install permanent EIXO signing key
+        shell: bash
+        env:
+          KEY_B64: ${{ secrets.EIXO_DEBUG_KEYSTORE_BASE64 }}
+        run: |
+          set -euo pipefail
+          if [ -z "$KEY_B64" ]; then
+            echo 'ERRO: configure o Secret EIXO_DEBUG_KEYSTORE_BASE64 antes de compilar.'
+            exit 1
+          fi
+          mkdir -p "$HOME/.android"
+          chmod 700 "$HOME/.android"
+          umask 077
+          printf '%s' "$KEY_B64" | base64 --decode > "$HOME/.android/debug.keystore"
+          keytool -list -keystore "$HOME/.android/debug.keystore" -storepass android -alias androiddebugkey >/dev/null
+          PIN='1eaf62a2d7504055022c6303dd18fbfb6458a11aae6eb544de000c65497e2926'
+          KEY_SHA="$(keytool -exportcert -keystore "$HOME/.android/debug.keystore" \
+            -storepass android -alias androiddebugkey 2>/dev/null | sha256sum | awk '{print $1}')"
+          echo "Certificado configurado: $KEY_SHA"
+          if [ "$KEY_SHA" != "$PIN" ]; then
+            echo 'ERRO: o Secret contem uma chave diferente da assinatura fixa EIXO.'
+            exit 1
+          fi
+          echo 'Assinatura fixa EIXO validada e carregada do GitHub Secrets.'
+
+      - name: Download EIXO interface
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --location --silent --show-error --retry 3 \
+            'https://eixo-life.floot.app/_cdn/static/eixo-v014-working-2.txt' \
+            -o /tmp/eixo-staged.html
+          test -s /tmp/eixo-staged.html
+          grep -qi '<!doctype html>' /tmp/eixo-staged.html
+
+      - name: Repair login, cloud safety, and Android navigation
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p web
+          python3 - /tmp/eixo-staged.html web/index.html <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+
+          def exactly(text, old, new, name):
+              n=text.count(old)
+              if n != 1: raise RuntimeError(f'{name}: expected one location, got {n}')
+              return text.replace(old,new,1)
+
+          src=Path(sys.argv[1]).read_text('utf-8')
+          selectors=re.compile(r'(?m)^([ \t]*)\$\(([^()\n]+)\)\.forEach')
+          # The hosted staging file needs 6 selector repairs; the extracted APK already contains them.
+          if len(selectors.findall(src)):
+              repairs=len(selectors.findall(src))
+              if repairs!=6:raise RuntimeError(f'Unexpected selector repairs: {repairs}')
+              src=selectors.sub(lambda m:m.group(1)+'$$('+m.group(2)+').forEach',src)
+          if selectors.search(src):raise RuntimeError('Unrepaired selector')
+          marker="  const EIXO_APP_URL = 'https://eixo-life.floot.app/';"
+          helper='''  const EIXO_APP_URL = 'https://eixo-life.floot.app/';
+            async function eixoFetch(url, options={}){
+              const controller=new AbortController();
+              const timer=setTimeout(()=>controller.abort(),15000);
+              try{
+                return await window.fetch(url,{...options,signal:controller.signal});
+              }catch(error){
+                if(error?.name==='AbortError')throw new Error('O servidor demorou a responder. Confira sua conexão e tente novamente.');
+                throw new Error('Falha na conexão com o EIXO. Confira sua internet e tente novamente.');
+              }finally{clearTimeout(timer)}
+            }'''
+          src=exactly(src,marker,helper,'fetch timeout helper')
+          src,n=re.subn(r'\bawait fetch\(', 'await eixoFetch(',src)
+          if n<8:raise RuntimeError(f'Expected several API calls; replaced {n}')
+          old="""    }catch{return null}
+            }
+            function normalizeCloudState(raw){"""
+          new="""    }catch(error){throw new Error('Não foi possível verificar seus dados na nuvem. Nada foi substituído; confira sua conexão e tente novamente.')}
+            }
+            function normalizeCloudState(raw){"""
+          src=exactly(src,old,new,'cloud read failure guard')
+          old="""  async function initSupabaseAuth(){
+              googleEnabled=await detectGoogleProvider();
+              let session=parseOAuthHash()||getStoredSession();
+              if(session?.expires_at && Number(session.expires_at)<Math.floor(Date.now()/1000)+60) session=await refreshSession(session);
+              if(session)session=await fetchAuthUser(session);
+              if(session){
+                storeSession(session);authSession=session;await syncAfterLogin();
+                const returned=new URLSearchParams(location.search).get('pro')==='return';
+                if(returned){await syncProFromProvider();proMessage=isProActive()?'Pagamento confirmado. Seu EIXO Pro está ativo.':'Pagamento recebido. Estamos confirmando sua assinatura.';try{history.replaceState({},'',location.pathname)}catch{}}
+              }else{storeSession(null);authSession=null;proSubscription=null;state.loggedIn=false}
+              authReady=true;render();
+            }"""
+          new="""  async function initSupabaseAuth(){
+              try{
+                googleEnabled=await detectGoogleProvider();
+                let session=parseOAuthHash()||getStoredSession();
+                if(session?.expires_at && Number(session.expires_at)<Math.floor(Date.now()/1000)+60) session=await refreshSession(session);
+                if(session)session=await fetchAuthUser(session);
+                if(session){
+                  storeSession(session);authSession=session;await syncAfterLogin();
+                  const returned=new URLSearchParams(location.search).get('pro')==='return';
+                  if(returned){await syncProFromProvider();proMessage=isProActive()?'Pagamento confirmado. Seu EIXO Pro está ativo.':'Pagamento recebido. Estamos confirmando sua assinatura.';try{history.replaceState({},'',location.pathname)}catch{}}
+                }else{storeSession(null);authSession=null;proSubscription=null;state.loggedIn=false}
+              }catch(error){
+                console.error('EIXO authentication initialization failed:',error);
+                authSession=null;state.loggedIn=false;syncStatus='error';
+                authMessage=error?.message||'Não foi possível conectar agora. Seus dados foram preservados.';
+              }finally{authReady=true;render()}
+            }"""
+          src=exactly(src,old,new,'auth startup catch/finally')
+          old="""const session={...data,expires_at:Math.floor(Date.now()/1000)+(data.expires_in||3600)};storeSession(session);authSession=await fetchAuthUser(session);storeSession(authSession);await syncAfterLogin();authMessage='';render();"""
+          new="""const session={...data,expires_at:Math.floor(Date.now()/1000)+(data.expires_in||3600)};
+              storeSession(session);
+              const checked=await fetchAuthUser(session);
+              if(!checked)throw new Error('A senha foi recebida, mas não foi possível confirmar sua conta. Confira a conexão e tente novamente.');
+              authSession=checked;storeSession(checked);
+              await syncAfterLogin();authMessage='';render();"""
+          src=exactly(src,old,new,'sign-in validation')
+          old="""authSession=await fetchAuthUser(session);storeSession(authSession);state.profile.name=state.profile.name||name;"""
+          new="""authSession=await fetchAuthUser(session);if(!authSession)throw new Error('Não foi possível confirmar a nova conta. Tente novamente.');storeSession(authSession);state.profile.name=state.profile.name||name;"""
+          src=exactly(src,old,new,'signup validation')
+          # Add a content marker and keep the page live under the original domain.
+          src=exactly(src,'<title>EIXO v0.8 — Sua vida. Sua direção.</title>','<title>EIXO v0.14.1 — Sua vida. Sua direção.</title>','title')
+          for term in ['function eixoHandleBack','function applyEixoReset','data-bulk-delete','data-reset-kind','async function eixoFetch','bootstrapped:true']:
+              if term not in src:raise RuntimeError('Missing feature: '+term)
+          Path(sys.argv[2]).write_text(src,encoding='utf-8')
+          print('EIXO source prepared. Bytes:',len(src.encode()),'Fetch calls secured:',n,'Selectors verified.')
+          PY
+          node <<'JS'
+          const fs = require('fs');
+          const text = fs.readFileSync('web/index.html','utf8');
+          const scripts = [...text.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)];
+          if (scripts.length !== 1) throw new Error('O EIXO precisa ter um script principal');
+          new Function(scripts[0][1]);
+          for(const term of ['function eixoFetch','function eixoHandleBack','function applyEixoReset','data-bulk-delete','data-reset-kind']){
+            if(!text.includes(term))throw new Error('Recurso ausente: '+term);
+          }
+          console.log('EIXO v0.14.1 syntax/features: PASS');
+          JS
+
+      - name: Generate native Android project
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > package.json <<'JSON'
+          {
+            "name":"eixo-android",
+            "version":"0.14.1",
+            "private":true,
+            "dependencies":{
+              "@capacitor/core":"7.4.3",
+              "@capacitor/android":"7.4.3"
+            },
+            "devDependencies":{"@capacitor/cli":"7.4.3"}
+          }
+          JSON
+          cat > capacitor.config.json <<'JSON'
+          {
+            "appId":"com.eixo.life",
+            "appName":"EIXO",
+            "webDir":"web",
+            "android":{
+              "adjustMarginsForEdgeToEdge":"auto",
+              "backgroundColor":"#0b0d10"
+            },
+            "server":{
+              "url":"https://eixo-life.floot.app/",
+              "androidScheme":"https",
+              "cleartext":false,
+              "allowNavigation":["eixo-life.floot.app"]
+            }
+          }
+          JSON
+          npm install --no-audit --no-fund
+          npx cap add android
+          npx cap sync android
+          test -f android/gradlew
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          f=Path('android/app/build.gradle')
+          s=f.read_text()
+          s,a=re.subn(r'(?m)^(\s*)versionCode\s+\d+',r'\g<1>versionCode 141',s,count=1)
+          s,b=re.subn(r'(?m)^(\s*)versionName\s+["\x27][^"\x27]+["\x27]',r'\g<1>versionName "0.14.1"',s,count=1)
+          if a!=1 or b!=1:raise RuntimeError('Não foi possível atualizar versionCode/versionName')
+          f.write_text(s)
+          print('Android versionCode=141, versionName=0.14.1')
+          PY
+
+      - name: Install direct HTML loader and Android Back handler
+        shell: bash
+        run: |
+          set -euo pipefail
+          MAIN="$(find android/app/src/main/java -type f -name MainActivity.java | head -n 1)"
+          test -n "$MAIN"
+          grep -q '^package com\.eixo\.life;' "$MAIN"
+          mkdir -p android/app/src/main/assets
+          cp web/index.html android/app/src/main/assets/eixo-v0141.html
+          cat > "$MAIN" <<'JAVA'
+          package com.eixo.life;
+
+          import android.net.Uri;
+          import android.os.Bundle;
+          import android.webkit.WebView;
+          import android.webkit.WebResourceRequest;
+          import android.webkit.WebResourceResponse;
+          import androidx.activity.OnBackPressedCallback;
+          import com.getcapacitor.BridgeActivity;
+          import com.getcapacitor.BridgeWebViewClient;
+          import java.io.IOException;
+          import java.io.InputStream;
+          import java.util.Collections;
+
+          public class MainActivity extends BridgeActivity {
+              private static final String SITE_URL = "https://eixo-life.floot.app/";
+              private static final String BACK_SCRIPT =
+                  "(function(){try{" +
+                  "if(typeof window.eixoHandleBack==='function')return !!window.eixoHandleBack();" +
+                  "var d=document;var m=d.querySelector('.modal-backdrop');" +
+                  "if(m){var b=m.querySelector('[data-close-modal]');if(b){b.click();return true;}}" +
+                  "var a=d.querySelector('.bottom-nav .nav-item.active');" +
+                  "if(a&&a.getAttribute('data-route')!=='today'){" +
+                  "var h=d.querySelector('.bottom-nav [data-route=\"today\"]');" +
+                  "if(h){h.click();return true;}}" +
+                  "return false;}catch(e){return false;}})();";
+
+              @Override
+              public void onCreate(Bundle state) {
+                  super.onCreate(state);
+                  if (getBridge() != null) {
+                      getBridge().setWebViewClient(new BridgeWebViewClient(getBridge()) {
+                          @Override
+                          public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+                              Uri uri=request.getUrl();
+                              String path=uri.getPath();
+                              if (request.isForMainFrame() && "https".equals(uri.getScheme()) &&
+                                      "eixo-life.floot.app".equalsIgnoreCase(uri.getHost()) &&
+                                      (path == null || path.isEmpty() || "/".equals(path))) {
+                                  try {
+                                      InputStream html=MainActivity.this.getAssets().open("eixo-v0141.html");
+                                      return new WebResourceResponse("text/html", "UTF-8", 200, "OK",
+                                          Collections.singletonMap("Cache-Control", "no-store"),html);
+                                  } catch (IOException e) {
+                                      android.util.Log.e("EIXO", "Interface empacotada indisponível",e);
+                                  }
+                              }
+                              return super.shouldInterceptRequest(view,request);
+                          }
+                      });
+                      WebView webView=getBridge().getWebView();
+                      webView.clearCache(true);
+                      webView.post(()->{
+                          webView.stopLoading();
+                          webView.loadUrl(SITE_URL+"?eixo-native=141");
+                      });
+                  }
+                  getOnBackPressedDispatcher().addCallback(this,new OnBackPressedCallback(true){
+                      @Override
+                      public void handleOnBackPressed(){
+                          WebView webView=getBridge()!=null?getBridge().getWebView():null;
+                          if(webView==null){exitNormally();return;}
+                          webView.evaluateJavascript(BACK_SCRIPT,result->{
+                              if(!"true".equals(result))exitNormally();
+                          });
+                      }
+                      private void exitNormally(){
+                          setEnabled(false);
+                          getOnBackPressedDispatcher().onBackPressed();
+                          setEnabled(true);
+                      }
+                  });
+              }
+          }
+          JAVA
+          test -s android/app/src/main/assets/eixo-v0141.html
+          grep -q 'text/html' "$MAIN"
+          grep -q 'eixoHandleBack' "$MAIN"
+
+      - name: Compile APK using fixed signing key
+        shell: bash
+        env:
+          GRADLE_OPTS: -Dorg.gradle.jvmargs=-Xmx4g
+        run: |
+          set -euo pipefail
+          chmod +x android/gradlew
+          cd android
+          ./gradlew :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Verify signature and APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          APK='android/app/build/outputs/apk/debug/app-debug.apk'
+          test -s "$APK"
+          TOOLS="$ANDROID_SDK_ROOT/build-tools/35.0.0"
+
+          echo '=== Package details ==='
+          "$TOOLS/aapt" dump badging "$APK" > /tmp/eixo-badging.txt
+          grep '^package: ' /tmp/eixo-badging.txt
+          if ! grep -q "package: name='com.eixo.life' versionCode='141'" /tmp/eixo-badging.txt; then
+            echo 'ERRO: package name ou versionCode inesperado.'
+            exit 1
+          fi
+
+          echo '=== APK signature details ==='
+          "$TOOLS/apksigner" verify --verbose --print-certs "$APK" | tee /tmp/eixo-signing.txt
+
+          EXPECTED="$(keytool -exportcert \
+            -keystore "$HOME/.android/debug.keystore" \
+            -storepass android -alias androiddebugkey 2>/dev/null \
+            | sha256sum | awk '{print $1}')"
+          ACTUAL="$(sed -nE 's/^Signer #1 certificate SHA-256 digest: ([[:xdigit:]]+).*$/\1/p' \
+            /tmp/eixo-signing.txt | head -n 1 | tr '[:upper:]' '[:lower:]')"
+
+          echo "Certificate expected (GitHub Secret): $EXPECTED"
+          echo "Certificate actual (APK):           $ACTUAL"
+          if [ -z "$ACTUAL" ] || [ "$ACTUAL" != "$EXPECTED" ]; then
+            echo 'ERRO: APK nao foi assinado com o certificado do Secret.'
+            exit 1
+          fi
+
+          mkdir -p dist
+          cp "$APK" dist/EIXO-v0.14.1-Login-Fix.apk
+          sha256sum dist/EIXO-v0.14.1-Login-Fix.apk > dist/EIXO-v0.14.1-Login-Fix.apk.sha256
+          echo 'APK, versionCode e assinatura fixa EIXO verificados.'
+          ls -lh dist/*
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: EIXO-v0.14.1-Login-Fix
+          path: dist/
+          if-no-files-found: error
+          retention-days: 30
