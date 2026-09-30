@@ -1,5 +1,5 @@
 
-name: Build EIXO Android v0.13
+name: Build EIXO Android v0.13 Safe Area
 
 on:
   workflow_dispatch:
@@ -14,14 +14,14 @@ permissions:
 
 jobs:
   build:
-    name: EIXO Android Test APK
+    name: EIXO Android Safe Area APK
     runs-on: ubuntu-24.04
     timeout-minutes: 45
 
     env:
       EIXO_URL: https://eixo-life.floot.app/
       APP_ID: com.eixo.life
-      APP_VERSION: 0.13.0
+      APP_VERSION: 0.13.1
       ANDROID_HOME: /usr/local/lib/android/sdk
       ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
 
@@ -29,7 +29,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Java 21 required by Capacitor 7
+      - name: Java 21 for Capacitor 7
         uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -58,8 +58,6 @@ jobs:
 
           export PATH="$(dirname "$SDKMANAGER"):$ANDROID_SDK_ROOT/platform-tools:$PATH"
 
-          echo "SDK Manager: $SDKMANAGER"
-
           yes | "$SDKMANAGER" --licenses >/dev/null || true
 
           "$SDKMANAGER" \
@@ -70,7 +68,7 @@ jobs:
           test -d "$ANDROID_SDK_ROOT/platforms/android-35"
           test -f "$ANDROID_SDK_ROOT/build-tools/35.0.0/aapt"
 
-          echo 'Android SDK configurado com sucesso.'
+          echo 'Android SDK configurado.'
 
       - name: Verify published EIXO before packaging
         shell: bash
@@ -90,9 +88,9 @@ jobs:
           grep -qi '<!doctype html>' /tmp/eixo-source.html
           grep -q 'initSupabaseAuth' /tmp/eixo-source.html
 
-          echo 'EIXO published site and v0.13 source verified.'
+          echo 'Site e fonte EIXO verificados.'
 
-      - name: Prepare Capacitor project
+      - name: Prepare Capacitor project with Android Safe Area
         shell: bash
         run: |
           set -euo pipefail
@@ -109,7 +107,7 @@ jobs:
           </head>
           <body style="margin:0;background:#0b0d10;color:#f5f7f9;font:16px system-ui;padding:28px">
             <h1>EIXO</h1>
-            <p>Para abrir o EIXO, conecte-se à internet e reinicie o aplicativo.</p>
+            <p>Para abrir o EIXO, conecte-se a internet e reinicie o aplicativo.</p>
           </body>
           </html>
           HTML
@@ -117,7 +115,7 @@ jobs:
           cat > package.json <<'JSON'
           {
             "name": "eixo-android",
-            "version": "0.13.0",
+            "version": "0.13.1",
             "private": true,
             "dependencies": {
               "@capacitor/core": "7.4.3",
@@ -134,6 +132,10 @@ jobs:
             "appId": "com.eixo.life",
             "appName": "EIXO",
             "webDir": "web",
+            "android": {
+              "adjustMarginsForEdgeToEdge": "auto",
+              "backgroundColor": "#F6E7D0"
+            },
             "server": {
               "url": "https://eixo-life.floot.app/",
               "androidScheme": "https",
@@ -142,6 +144,24 @@ jobs:
             }
           }
           JSON
+
+          node - <<'JS'
+          const fs = require('fs');
+
+          const cfg = JSON.parse(
+            fs.readFileSync('capacitor.config.json', 'utf8')
+          );
+
+          if (cfg.android.adjustMarginsForEdgeToEdge !== 'auto') {
+            throw new Error('Safe Area nao configurada');
+          }
+
+          if (cfg.server.url !== 'https://eixo-life.floot.app/') {
+            throw new Error('URL incorreta');
+          }
+
+          console.log('Capacitor: Android 15 safe areas habilitadas.');
+          JS
 
       - name: Install Capacitor and generate native Android project
         shell: bash
@@ -158,7 +178,7 @@ jobs:
 
           grep -q 'com.eixo.life' android/app/build.gradle
 
-          echo 'Native Android project created.'
+          echo 'Projeto Android pronto com safe areas.'
 
       - name: Compile installable APK
         shell: bash
@@ -194,16 +214,17 @@ jobs:
 
           mkdir -p dist
 
-          cp "$APK" dist/EIXO-v0.13-Android-Test.apk
+          cp "$APK" dist/EIXO-v0.13.1-SafeArea.apk
 
-          sha256sum dist/EIXO-v0.13-Android-Test.apk > dist/EIXO-v0.13-Android-Test.apk.sha256
+          sha256sum dist/EIXO-v0.13.1-SafeArea.apk \
+            > dist/EIXO-v0.13.1-SafeArea.apk.sha256
 
           ls -lh dist/*
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: EIXO-v0.13-Android-Test
+          name: EIXO-v0.13.1-Android-SafeArea
           path: dist/
           if-no-files-found: error
           retention-days: 30
