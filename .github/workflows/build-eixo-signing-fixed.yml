@@ -1,4 +1,4 @@
-name: Build EIXO Android v0.15
+name: Build EIXO Android v0.16.0 Stable Auth Sync
 
 on:
   workflow_dispatch:
@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   build:
-    name: EIXO v0.15 Android - fixed signature
+    name: EIXO v0.16.0 Android - Stable Auth Sync
     runs-on: ubuntu-24.04
     timeout-minutes: 45
 
@@ -77,7 +77,7 @@ jobs:
           echo "EIXO_SIGNING_KEYSTORE=$HOME/.android/debug.keystore" >> "$GITHUB_ENV"
           echo 'Chave permanente validada.'
 
-      - name: Validate full local EIXO v0.15 source
+      - name: Validate full local EIXO v0.16 source
         shell: bash
         run: |
           set -euo pipefail
@@ -87,18 +87,19 @@ jobs:
           p=Path('web/index.html')
           s=p.read_text('utf-8')
           expected=[
-            'EIXO v0.15',
+            'EIXO v0.16',
             'ACTIVITY_GROUPS', 'ACTIVITY_PACKS',
             'function createActivity', 'function advanceTaskMetric',
             'function advanceHabitMetric', 'function createPack',
             'function eixoHandleBack', 'function applyEixoReset',
-            'function initSupabaseAuth', 'function saveMetricItemEdit',
-            'data-template-open', 'data-catalog-open'
+            'function initSupabaseAuth', 'function updateRecoveredPassword',
+            'function authRedirectUrl', 'function syncNow', 'function saveMetricItemEdit',
+            'data-template-open', 'data-catalog-open', 'recovery-form', 'data-sync-now'
           ]
           if len(s.encode()) < 190000: raise RuntimeError('HTML aparentemente incompleto')
           for feature in expected:
             if feature not in s:raise RuntimeError('Funcao ausente: '+feature)
-          print('v0.15 fonte local validada:',len(s.encode()),'bytes')
+          print('v0.16 fonte local validada:',len(s.encode()),'bytes')
           PY
           node <<'JS'
           const fs=require('fs'),vm=require('vm');
@@ -106,7 +107,7 @@ jobs:
           const scripts=[...h.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/g)];
           if(scripts.length!==1)throw Error('EIXO precisa de um script principal');
           new vm.Script(scripts[0][1]);
-          console.log('EIXO v0.15 JavaScript syntax: PASS');
+          console.log('EIXO v0.16 JavaScript syntax: PASS');
           JS
 
       - name: Generate Capacitor Android project
@@ -116,7 +117,7 @@ jobs:
           cat > package.json <<'JSON'
           {
             "name": "eixo-android",
-            "version": "0.15.0",
+            "version": "0.16.0",
             "private": true,
             "dependencies": {
               "@capacitor/core": "7.4.3",
@@ -152,8 +153,8 @@ jobs:
           from pathlib import Path
           import re
           f=Path('android/app/build.gradle');s=f.read_text()
-          s,a=re.subn(r'(?m)^(\s*)versionCode\s+\d+',r'\g<1>versionCode 150',s,count=1)
-          s,b=re.subn(r'(?m)^(\s*)versionName\s+["\x27][^"\x27]+["\x27]',r'\g<1>versionName "0.15.0"',s,count=1)
+          s,a=re.subn(r'(?m)^(\s*)versionCode\s+\d+',r'\g<1>versionCode 160',s,count=1)
+          s,b=re.subn(r'(?m)^(\s*)versionName\s+["\x27][^"\x27]+["\x27]',r'\g<1>versionName "0.16.0"',s,count=1)
           if a!=1 or b!=1:raise RuntimeError('versionCode/versionName nao atualizados')
           f.write_text(s)
           PY
@@ -188,10 +189,34 @@ jobs:
           test -n "$MAIN"
           grep -q '^package com\.eixo\.life;' "$MAIN"
           mkdir -p android/app/src/main/assets
-          cp web/index.html android/app/src/main/assets/eixo-v015.html
+          cp web/index.html android/app/src/main/assets/eixo-v016.html
+
+          python3 - <<'PY'
+          from pathlib import Path
+          p=Path('android/app/src/main/AndroidManifest.xml')
+          s=p.read_text()
+          marker='</activity>'
+          if marker not in s:
+              raise RuntimeError('MainActivity closing tag not found')
+          deep="""
+              <intent-filter>
+                  <action android:name="android.intent.action.VIEW" />
+                  <category android:name="android.intent.category.DEFAULT" />
+                  <category android:name="android.intent.category.BROWSABLE" />
+                  <data
+                      android:scheme="com.eixo.life"
+                      android:host="auth"
+                      android:path="/callback" />
+              </intent-filter>
+          """
+          s=s.replace(marker,deep+marker,1)
+          p.write_text(s)
+          PY
+          grep -q 'android:scheme="com.eixo.life"' android/app/src/main/AndroidManifest.xml
           cat > "$MAIN" <<'JAVA'
           package com.eixo.life;
 
+          import android.content.Intent;
           import android.net.Uri;
           import android.os.Bundle;
           import android.webkit.WebView;
@@ -206,6 +231,8 @@ jobs:
 
           public class MainActivity extends BridgeActivity {
               private static final String SITE_URL = "https://eixo-life.floot.app/";
+              private static final String SUPABASE_HOST = "uszvprmrmoztdipgzgvh.supabase.co";
+              private static final String AUTH_CALLBACK = "com.eixo.life://auth/callback";
               private static final String BACK_SCRIPT =
                   "(function(){try{" +
                   "if(typeof window.eixoHandleBack==='function')return !!window.eixoHandleBack();" +
@@ -223,6 +250,29 @@ jobs:
                   if(getBridge()!=null){
                       getBridge().setWebViewClient(new BridgeWebViewClient(getBridge()) {
                           @Override
+                          public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+                              Uri uri = request.getUrl();
+                              if ("https".equalsIgnoreCase(uri.getScheme()) &&
+                                  SUPABASE_HOST.equalsIgnoreCase(uri.getHost()) &&
+                                  "/auth/v1/authorize".equals(uri.getPath()) &&
+                                  "google".equals(uri.getQueryParameter("provider"))) {
+                                  Uri external = Uri.parse("https://" + SUPABASE_HOST + "/auth/v1/authorize")
+                                      .buildUpon()
+                                      .appendQueryParameter("provider", "google")
+                                      .appendQueryParameter("redirect_to", AUTH_CALLBACK)
+                                      .build();
+                                  try {
+                                      startActivity(new Intent(Intent.ACTION_VIEW, external));
+                                  } catch (Exception e) {
+                                      android.util.Log.e("EIXO", "Nao foi possivel abrir o login Google", e);
+                                      return false;
+                                  }
+                                  return true;
+                              }
+                              return super.shouldOverrideUrlLoading(view, request);
+                          }
+
+                          @Override
                           public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
                               Uri uri=request.getUrl();
                               String path=uri.getPath();
@@ -231,7 +281,7 @@ jobs:
                                   "eixo-life.floot.app".equalsIgnoreCase(uri.getHost()) &&
                                   (path==null||path.isEmpty()||"/".equals(path))){
                                   try{
-                                      InputStream html=MainActivity.this.getAssets().open("eixo-v015.html");
+                                      InputStream html=MainActivity.this.getAssets().open("eixo-v016.html");
                                       return new WebResourceResponse("text/html","UTF-8",200,"OK",
                                           Collections.singletonMap("Cache-Control","no-store"),html);
                                   }catch(IOException e){
@@ -243,7 +293,7 @@ jobs:
                       });
                       WebView webView=getBridge().getWebView();
                       webView.clearCache(true);
-                      webView.post(()->{webView.stopLoading();webView.loadUrl(SITE_URL+"?eixo-native=150");});
+                      webView.post(()->{webView.stopLoading();webView.loadUrl(SITE_URL+"?eixo-native=160");});
                   }
                   getOnBackPressedDispatcher().addCallback(this,new OnBackPressedCallback(true){
                       @Override public void handleOnBackPressed(){
@@ -257,12 +307,46 @@ jobs:
                           setEnabled(true);
                       }
                   });
+
+                  handleAuthCallback(getIntent());
+              }
+
+              @Override
+              protected void onNewIntent(Intent intent) {
+                  super.onNewIntent(intent);
+                  setIntent(intent);
+                  handleAuthCallback(intent);
+              }
+
+              private void handleAuthCallback(Intent intent) {
+                  if(intent==null || intent.getData()==null || getBridge()==null)return;
+                  Uri uri=intent.getData();
+                  if(!"com.eixo.life".equalsIgnoreCase(uri.getScheme()) ||
+                     !"auth".equalsIgnoreCase(uri.getHost()) ||
+                     !"/callback".equals(uri.getPath()))return;
+
+                  String fragment=uri.getEncodedFragment();
+                  String query=uri.getEncodedQuery();
+
+                  String target=SITE_URL+"?eixo-native=160";
+                  if(fragment!=null && !fragment.isEmpty()){
+                      target += "#" + fragment;
+                  }else if(query!=null && !query.isEmpty()){
+                      target += "#" + query;
+                  }
+
+                  WebView webView=getBridge().getWebView();
+                  final String finalTarget=target;
+                  webView.post(()->webView.loadUrl(finalTarget));
               }
           }
           JAVA
-          test -s android/app/src/main/assets/eixo-v015.html
+          test -s android/app/src/main/assets/eixo-v016.html
           grep -q 'text/html' "$MAIN"
           grep -q 'eixoHandleBack' "$MAIN"
+          grep -q 'AUTH_CALLBACK' "$MAIN"
+          grep -q 'shouldOverrideUrlLoading' "$MAIN"
+          grep -q 'onNewIntent' "$MAIN"
 
       - name: Compile APK with permanent signature
         shell: bash
@@ -283,7 +367,7 @@ jobs:
           TOOLS="$ANDROID_SDK_ROOT/build-tools/35.0.0"
           "$TOOLS/aapt" dump badging "$APK" > /tmp/eixo-badging.txt
           grep '^package: ' /tmp/eixo-badging.txt
-          if ! grep -q "package: name='com.eixo.life' versionCode='150'" /tmp/eixo-badging.txt; then
+          if ! grep -q "package: name='com.eixo.life' versionCode='160'" /tmp/eixo-badging.txt; then
             echo 'ERRO: packageId ou versionCode incorretos.';exit 1
           fi
           "$TOOLS/apksigner" verify --print-certs "$APK" | tee /tmp/eixo-signing.txt
@@ -297,15 +381,14 @@ jobs:
             echo 'ERRO: assinatura divergente';exit 1
           fi
           mkdir -p dist
-          cp "$APK" dist/EIXO-v0.15-Android.apk
-          sha256sum dist/EIXO-v0.15-Android.apk > dist/EIXO-v0.15-Android.apk.sha256
+          cp "$APK" dist/EIXO-v0.16.0.apk
+          sha256sum dist/EIXO-v0.16.0.apk > dist/EIXO-v0.16.0.apk.sha256
           ls -lh dist/*
 
       - name: Upload installable EIXO APK
         uses: actions/upload-artifact@v4
         with:
-          name: EIXO-v0.15-Android
+          name: EIXO-v0.16.0-Android
           path: dist/
           if-no-files-found: error
           retention-days: 30
-          
